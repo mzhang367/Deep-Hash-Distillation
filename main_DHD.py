@@ -3,16 +3,21 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from loss import *
 from Dataloader import Loader
 from Retrieval import DoRetrieval
+import os
+import sys
+from datetime import datetime
+import errno
+import torch
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DHD', add_help=False)
 
     parser.add_argument('--gpu_id', default="0", type=str, help="""Define GPU id.""")
-    parser.add_argument('--data_dir', default="/data", type=str, help="""Path to dataset.""")
+    parser.add_argument('--data_dir', default="../data", type=str, help="""Path to dataset.""")
     parser.add_argument('--dataset', default="imagenet", type=str, help="""Dataset name: imagenet, nuswide_m, coco.""")
     
     parser.add_argument('--batch_size', default=128, type=int, help="""Training mini-batch size.""")
-    parser.add_argument('--num_workers', default=12, type=int, help="""Number of data loading workers per GPU.""")
+    parser.add_argument('--num_workers', default=4, type=int, help="""Number of data loading workers per GPU.""")
     parser.add_argument('--encoder', default="AlexNet", type=str, help="""Encoder network: ResNet, AlexNet, ViT, DeiT, SwinT.""")
     parser.add_argument('--N_bits', default=64, type=int, help="""Number of bits to retrieval.""")
     parser.add_argument('--init_lr', default=3e-4, type=float, help="""Initial learning rate.""")
@@ -25,10 +30,58 @@ def get_args_parser():
 
     parser.add_argument('--max_epoch', default=500, type=int, help="""Number of epochs to train.""")
     parser.add_argument('--eval_epoch', default=10, type=int, help="""Compute mAP for Every N-th epoch.""")
-    parser.add_argument('--eval_init', default=50, type=int, help="""Compute mAP after N-th epoch.""")
+    parser.add_argument('--eval_init', default=10, type=int, help="""Compute mAP after N-th epoch.""")
     parser.add_argument('--output_dir', default=".", type=str, help="""Path to save logs and checkpoints.""")
 
     return parser
+
+def mkdir_if_missing(directory):
+    if not os.path.exists(directory):
+        try:
+            os.makedirs(directory)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
+
+class Logger(object):
+    """
+    Write console output to external text file.
+
+    Code imported from https://github.com/Cysu/open-reid/blob/master/reid/utils/logging.py.
+    """
+    def __init__(self, fpath=None):
+        self.console = sys.stdout
+        self.file = None
+        if fpath is not None:
+            mkdir_if_missing(os.path.dirname(fpath))
+            self.file = open(fpath, 'w')
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        pass
+
+    def __exit__(self, *args):
+        self.close()
+
+    def write(self, msg):
+        self.console.write(msg)
+        if self.file is not None:
+            self.file.write(msg)
+
+    def flush(self):
+        self.console.flush()
+        if self.file is not None:
+            self.file.flush()
+            os.fsync(self.file.fileno())
+
+    def close(self):
+        self.console.close()
+        if self.file is not None:
+            self.file.close()
+
+
 
 class Hash_func(nn.Module):
     def __init__(self, fc_dim, N_bits, NB_CLS):
@@ -71,10 +124,10 @@ def train(args):
         print("Wrong dataset name.")
         return
 
-    Img_dir = path+dname+'256'
-    Train_dir = path+dname+'_Train.txt'
-    Gallery_dir = path+dname+'_DB.txt'
-    Query_dir = path+dname+'_Query.txt'
+    Img_dir = os.path.join(path, dname)
+    Train_dir = os.path.join('./data', dname+'_Train.txt')
+    Gallery_dir = os.path.join('./data', dname+'_DB.txt')
+    Query_dir = os.path.join('./data', dname+'_Query.txt')
     org_size = 256
     input_size = 224
     
@@ -85,10 +138,10 @@ def train(args):
     Norm = nn.Sequential(Kg.Normalize(mean=T.as_tensor([0.485, 0.456, 0.406]), std=T.as_tensor([0.229, 0.224, 0.225])))
 
 
-    trainset = Loader(Img_dir, Train_dir, NB_CLS)
+    trainset = Loader(Img_dir, Train_dir, NB_CLS, folder='train' if args.dataset=='imagenet' else None)
     trainloader = T.utils.data.DataLoader(trainset, batch_size=batch_size, drop_last=True,
                                             shuffle=True, num_workers=args.num_workers)
-    
+    print("=======================Train on dataset: %s with No. images:%d=============================" %(dname, len(trainset)))
     if args.encoder=='AlexNet':
         Baseline = AlexNet()
         fc_dim = 4096
@@ -131,9 +184,9 @@ def train(args):
         S_loss = 0.0
         R_loss = 0.0
 
-        for i, data in enumerate(trainloader, 0):
+        for i, (inputs, labels) in enumerate(trainloader, 0):
             # get the inputs; data is a list of [inputs, labels]
-            inputs, labels = data[0].to(device), data[1].to(device)
+            inputs, labels = inputs.to(device), labels.to(device)
 
             # zero the parameter gradients
             optimizer.zero_grad()
@@ -177,9 +230,17 @@ def train(args):
 
             if mAP > MAX_mAP:
                 MAX_mAP = mAP
+                print("Saving...")
+                if not os.path.isdir('checkpoint'):
+                    os.mkdir('checkpoint')
+                torch.save(net.state_dict(), './checkpoint/%s' %args.output_dir)
+
             net.train()
             
 if __name__ == '__main__':
+    save_dir = 'log'
     parser = argparse.ArgumentParser('DHD', parents=[get_args_parser()])
     args = parser.parse_args()
+    sys.stdout = Logger(os.path.join(save_dir,
+                str(args.N_bits) + 'bits' + '_' + args.dataset + '_' + datetime.now().strftime('%m%d%H%M') + '.txt'))
     train(args)
